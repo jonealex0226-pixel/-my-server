@@ -70,6 +70,10 @@ app.delete('/api/users/:id', async (req, res) => {
     }
 });
 
+// Home Route
+app.get('/', (req, res) => {
+    res.send('Welcome to my API! Go to /api/users or /api/health');
+});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
