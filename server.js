@@ -31,19 +31,19 @@ app.get('/', (req, res) => {
     <!DOCTYPE html>
     <html>
     <head>
-      <title>AI Chat UI</title>
+      <title>Groq AI Chat</title>
       <style>
         body { background: #0f172a; color: #f8fafc; font-family: Arial; padding: 20px; }
         .container { max-width: 500px; margin: auto; background: #1e293b; padding: 20px; border-radius: 10px; }
-        h1 { color: #38bdf8; text-align: center; }
+        h1 { color: #f59e0b; text-align: center; }
         input { width: 80%; padding: 10px; border-radius: 5px; border: none; margin-bottom: 10px; }
-        button { padding: 10px 15px; background: #38bdf8; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; }
+        button { padding: 10px 15px; background: #f59e0b; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; }
         #output { margin-top: 20px; padding: 15px; background: #0f172a; border-radius: 5px; min-height: 50px; white-space: pre-wrap; }
       </style>
     </head>
     <body>
       <div class="container">
-        <h1>🤖 My Phone AI</h1>
+        <h1>⚡ Groq AI (Free & Fast)</h1>
         <input type="text" id="promptInput" placeholder="Ask the AI something...">
         <button onclick="sendPrompt()">Send</button>
         <div id="output">AI response will appear here...</div>
@@ -80,40 +80,47 @@ app.get('/', (req, res) => {
 
 app.post('/api/generate', promptGuard, async (req, res) => {
   const userPrompt = req.body.prompt;
-  const apiKey = process.env.OPENAI_API_KEY;
+  let aiReply = null;
+  let isFallback = false;
 
-  try {
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [{ role: "user", content: userPrompt }]
-      })
-    });
-
-    if (!response.ok) {
-      console.log("⚠️ [FALLBACK] OpenAI failed, using backup logic.");
-      const fallbackReply = "I'm a bit busy right now (limit reached). Please try again soon!";
-      saveToDatabase(userPrompt, fallbackReply);
-      return res.json({ reply: fallbackReply, isFallback: true });
+  // Using Groq API (Free, Fast, Llama 3 model)
+  if (process.env.GROQ_API_KEY) {
+    try {
+      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 
+            'Content-Type': 'application/json', 
+            'Authorization': `Bearer ${process.env.GROQ_API_KEY}` 
+        },
+        body: JSON.stringify({ 
+            model: "llama3-8b-8192", 
+            messages: [{ role: "user", content: userPrompt }] 
+        })
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        aiReply = data.choices[0].message.content;
+      } else {
+        console.log("⚠️ [GROQ] API failed.");
+      }
+    } catch (error) {
+      console.log("⚠️ [GROQ] Network error.");
     }
-
-    const data = await response.json();
-    const aiReply = data.choices[0].message.content;
-
-    saveToDatabase(userPrompt, aiReply);
-    res.json({ reply: aiReply });
-
-  } catch (error) {
-    console.log("🚨 [ERROR] Network issue, using fallback.");
-    res.json({ reply: "My brain is disconnected right now, but I am still alive!", isFallback: true });
+  } else {
+    console.log("⚠️ [GROQ] Missing API Key.");
   }
+
+  // Final Fallback (if Groq fails)
+  if (!aiReply) {
+    aiReply = "I'm experiencing high traffic right now. Please try again soon!";
+    isFallback = true;
+  }
+
+  saveToDatabase(userPrompt, aiReply);
+  res.json({ reply: aiReply, isFallback });
 });
 
 app.listen(port, () => {
-  console.log(`🚀 Full-Stack AI Server running on http://localhost:3000`);
+  console.log(`🚀 Groq AI Server running on http://localhost:3000`);
 });
