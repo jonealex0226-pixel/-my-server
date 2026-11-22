@@ -1,6 +1,6 @@
 require('dotenv').config();
 const dns = require('dns');
-dns.setServers(['1.1.1.1', '1.0.0.1']);
+dns.setServers(['1.1.1.1', '1.0.0.1']); // Cloudflare DNS
 
 const express = require('express');
 const { MongoClient } = require('mongodb');
@@ -9,7 +9,7 @@ const port = process.env.PORT || 3000;
 
 app.use(express.json());
 
-// --- 1. DATABASE SETUP (MongoDB) ---
+// --- 1. DATABASE SETUP ---
 const uri = process.env.MONGODB_URI;
 let db, chatsCollection;
 
@@ -22,14 +22,18 @@ if (uri) {
       console.log('✅ Connected to MongoDB');
     })
     .catch(err => console.log('❌ MongoDB Error:', err.message));
-} else {
-  console.log('⚠️ No MONGODB_URI found. Data will not save.');
 }
 
-// --- 2. SECURITY (Prompt Guard & Auth) ---
+// --- 2. SECURITY & PERSONALITY ---
 function getKey() {
   return (process.env.GROQ_API_KEY || '').trim().replace(/^["']|["']$/g, '');
 }
+
+// 👇 THIS IS THE AI PERSONALITY
+const systemPrompt = {
+  role: "system", 
+  content: "You are Hermes, a helpful, witty AI assistant. You must always reply in natural Hinglish (a mix of Hindi and English). Keep your answers concise, engaging, and friendly."
+};
 
 const badPatterns = [/ignore previous instructions/i, /print system prompt/i, /hack/i];
 function promptGuard(req, res, next) {
@@ -37,13 +41,12 @@ function promptGuard(req, res, next) {
   const lastMsg = messages[messages.length - 1]?.content || "";
   
   if (badPatterns.some((p) => p.test(lastMsg))) {
-    console.log('🚨 [SECURITY] Attack blocked:', lastMsg);
     return res.status(403).json({ error: 'Blocked: Prompt injection detected!' });
   }
   next();
 }
 
-// --- 3. FRONTEND UI (Login + Chat Memory) ---
+// --- 3. FRONTEND UI (Streaming + Secure Password) ---
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
 <html>
@@ -52,7 +55,7 @@ app.get('/', (req, res) => {
   <title>Hermes AI</title>
   <style>
     body { background: #0f172a; color: #f8fafc; font-family: Arial; margin: 0; padding: 20px; display: flex; justify-content: center; height: 100vh; box-sizing: border-box; }
-    .container { width: 100%; max-width: 500px; background: #1e293b; border-radius: 10px; display: flex; flex-direction: column; overflow: hidden; }
+    .container { width: 100%; max-width: 500px; background: #1e293b; border-radius: 10px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
     
     /* Login Screen */
     #login-screen { padding: 40px; text-align: center; display: flex; flex-direction: column; justify-content: center; height: 100%; }
@@ -63,42 +66,39 @@ app.get('/', (req, res) => {
     /* Chat Screen */
     #chat-screen { display: none; flex-direction: column; height: 100%; }
     #chat-box { flex: 1; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
-    .message { padding: 10px; border-radius: 8px; max-width: 80%; word-wrap: break-word; }
-    .user { background: #f59e0b; color: #000; align-self: flex-end; }
-    .ai { background: #334155; color: #fff; align-self: flex-start; }
+    .message { padding: 10px; border-radius: 8px; max-width: 80%; word-wrap: break-word; line-height: 1.4; }
+    .user { background: #f59e0b; color: #000; align-self: flex-end; border-bottom-right-radius: 0; }
+    .ai { background: #334155; color: #fff; align-self: flex-start; border-bottom-left-radius: 0; }
     .input-area { display: flex; padding: 10px; background: #0f172a; gap: 10px; }
     .input-area input { flex: 1; padding: 10px; border-radius: 5px; border: none; margin-bottom: 0; }
-    .input-area button { width: auto; }
+    .input-area button { width: auto; padding: 10px 20px; }
   </style>
 </head>
 <body>
   <div class="container">
-    
-    <!-- Login UI -->
     <div id="login-screen">
       <h1>🔒 Hermes AI</h1>
-      <p style="color:#94a3b8; font-size: 14px;">Enter the password to access the AI.</p>
+      <p style="color:#94a3b8; font-size: 14px;">Enter Password to unlock.</p>
       <input type="password" id="passInput" placeholder="Enter Password...">
       <button onclick="login()">Unlock</button>
     </div>
 
-    <!-- Chat UI -->
     <div id="chat-screen">
-      <div style="padding: 15px; background: #0f172a; text-align: center; font-weight: bold; color: #f59e0b;">⚡ Hermes Chat</div>
+      <div style="padding: 15px; background: #0f172a; text-align: center; font-weight: bold; color: #f59e0b;">⚡ Hermes (Hinglish)</div>
       <div id="chat-box">
-        <div class="message ai">Hello! I am your AI. I remember our chat. What's your name?</div>
+        <div class="message ai">Namaste! Main Hermes hoon. Aaj main aapki kya madad kar sakta hoon?</div>
       </div>
       <div class="input-area">
         <input type="text" id="promptInput" placeholder="Type a message..." onkeypress="if(event.key === 'Enter') sendPrompt()">
-        <button onclick="sendPrompt()">Send</button>
+        <button onclick="sendPrompt()" id="sendBtn">Send</button>
       </div>
     </div>
-
   </div>
   
   <script>
-    // Check if user already logged in
-    if (localStorage.getItem('hermes_pass')) {
+    const SECURE_PASSWORD = "Hermes@2026"; // 👈 CHANGE YOUR PASSWORD HERE
+
+    if (localStorage.getItem('hermes_pass') === SECURE_PASSWORD) {
       document.getElementById('login-screen').style.display = 'none';
       document.getElementById('chat-screen').style.display = 'flex';
     }
@@ -107,12 +107,12 @@ app.get('/', (req, res) => {
 
     function login() {
       const pass = document.getElementById('passInput').value;
-      if (pass === "12345") { // CHANGE THIS PASSWORD if you want!
+      if (pass === SECURE_PASSWORD) {
         localStorage.setItem('hermes_pass', pass);
         document.getElementById('login-screen').style.display = 'none';
         document.getElementById('chat-screen').style.display = 'flex';
       } else {
-        alert("Wrong password!");
+        alert("Galat password! (Wrong password)");
       }
     }
 
@@ -120,52 +120,62 @@ app.get('/', (req, res) => {
       const input = document.getElementById('promptInput');
       const prompt = input.value;
       const chatBox = document.getElementById('chat-box');
+      const sendBtn = document.getElementById('sendBtn');
+      
       if (!prompt) return;
       
-      // Add user msg to UI
       chatBox.innerHTML += '<div class="message user">' + prompt + '</div>';
       input.value = "";
+      sendBtn.disabled = true;
       chatBox.scrollTop = chatBox.scrollHeight;
       chatHistory.push({ role: "user", content: prompt });
 
-      // Thinking...
-      const thinkId = "think-" + Date.now();
-      chatBox.innerHTML += '<div class="message ai" id="' + thinkId + '">Thinking...</div>';
-      chatBox.scrollTop = chatBox.scrollHeight;
-      
+      const aiMsgId = "ai-" + Date.now();
+      chatBox.innerHTML += '<div class="message ai" id="' + aiMsgId + '">...</div>';
+      const aiMsgDiv = document.getElementById(aiMsgId);
+      let fullReply = "";
+
       try {
         const res = await fetch('/api/generate', {
           method: 'POST',
           headers: { 
             'Content-Type': 'application/json',
-            'x-app-password': localStorage.getItem('hermes_pass') // Send password
+            'x-app-password': localStorage.getItem('hermes_pass')
           },
           body: JSON.stringify({ messages: chatHistory })
         });
-        const data = await res.json();
-        document.getElementById(thinkId).remove();
+        
+        if (!res.ok) throw new Error("Network error");
 
-        if (data.error) {
-          chatBox.innerHTML += '<div class="message ai" style="color:red;">❌ ' + data.error + '</div>';
-        } else {
-          chatBox.innerHTML += '<div class="message ai">' + data.reply + '</div>';
-          chatHistory.push({ role: "assistant", content: data.reply });
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          
+          const chunk = decoder.decode(value);
+          fullReply += chunk;
+          aiMsgDiv.innerText = fullReply;
+          chatBox.scrollTop = chatBox.scrollHeight;
         }
+        
+        chatHistory.push({ role: "assistant", content: fullReply });
+
       } catch (err) {
-        document.getElementById(thinkId).innerText = "❌ Error.";
+        aiMsgDiv.innerText = "❌ Error connecting to AI.";
       }
-      chatBox.scrollTop = chatBox.scrollHeight;
+      sendBtn.disabled = false;
     }
   </script>
 </body>
 </html>`);
 });
 
-// --- 4. THE AI ENDPOINT ---
+// --- 4. THE AI ENDPOINT (Streaming + DB Save) ---
 app.post('/api/generate', (req, res, next) => {
-  // Check Password (Auth)
-  if (req.headers['x-app-password'] !== "12345") { 
-    return res.status(401).json({ error: 'Unauthorized. Wrong Password.' });
+  if (req.headers['x-app-password'] !== "Hermes@2026") { 
+    return res.status(401).json({ error: 'Unauthorized.' });
   }
   next();
 }, promptGuard, async (req, res) => {
@@ -173,47 +183,73 @@ app.post('/api/generate', (req, res, next) => {
   const messages = req.body.messages; 
   const userPrompt = messages[messages.length - 1].content; 
   const key = getKey();
-  let aiReply = null;
-  let debug = null;
 
-  if (!key) {
-    debug = 'GROQ_API_KEY is missing.';
-  } else {
-    try {
-      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
-        body: JSON.stringify({
-          model: 'openai/gpt-oss-20b', 
-          messages: messages // Send the whole history!
-        }),
-      });
+  if (!key) return res.send("API key missing.");
 
-      if (response.ok) {
-        const data = await response.json();
-        aiReply = data.choices[0].message.content;
-      } else {
-        debug = `Groq status ${response.status}`;
-      }
-    } catch (error) {
-      debug = 'Network error: ' + error.message;
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+      body: JSON.stringify({
+        model: 'openai/gpt-oss-20b', 
+        messages: [systemPrompt, ...messages], // Add personality!
+        stream: true // 👈 Enable streaming
+      }),
+    });
+
+    if (!response.ok) {
+       return res.send("AI limit reached. Please try again.");
     }
-  }
 
-  let isFallback = false;
-  if (!aiReply) {
-    aiReply = "I'm experiencing high traffic. Please try again!";
-    isFallback = true;
-  }
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Transfer-Encoding', 'chunked');
 
-  // Save to MongoDB if connected
-  if (chatsCollection) {
-    chatsCollection.insertOne({ time: new Date(), prompt: userPrompt, reply: aiReply })
-      .catch(err => console.log('DB Save Error:', err));
-  }
+    let fullReply = "";
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
 
-  res.json({ reply: aiReply, isFallback, debug });
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      
+      const chunk = decoder.decode(value);
+      const lines = chunk.split('\n');
+      
+      for (const line of lines) {
+        if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+          try {
+            const data = JSON.parse(line.slice(6));
+            const content = data.choices[0]?.delta?.content || "";
+            if (content) {
+              fullReply += content;
+              res.write(content); // Send to frontend
+            }
+          } catch (e) {}
+        }
+      }
+    }
+    res.end();
+
+    // Save to MongoDB AFTER the stream is completely finished
+    if (chatsCollection && fullReply) {
+      chatsCollection.insertOne({ time: new Date(), prompt: userPrompt, reply: fullReply })
+        .catch(err => console.log('DB Save Error:', err));
+    }
+
+  } catch (error) {
+    console.log("Error:", error.message);
+    res.send("Error generating response.");
+  }
 });
+
+// --- 5. KEEP RENDER AWAKE (Ping every 14 mins) ---
+setInterval(() => {
+  if (process.env.RENDER_EXTERNAL_URL) {
+    fetch(process.env.RENDER_EXTERNAL_URL + '/health').catch(() => {});
+  }
+}, 14 * 60 * 1000);
+
+app.get('/health', (req, res) => res.send('OK'));
 
 app.listen(port, () => {
   console.log(`🚀 Master Server running on port ${port}`);
