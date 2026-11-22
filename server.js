@@ -5,8 +5,6 @@ dns.setServers(['8.8.8.8', '8.8.4.4']); // Force Google DNS for SRV lookups
 const express = require('express');
 const { MongoClient } = require('mongodb');
 // ... the rest of your code remains exactly the same ...
-
-
 require('dotenv').config();
 const express = require('express');
 const { MongoClient } = require('mongodb');
