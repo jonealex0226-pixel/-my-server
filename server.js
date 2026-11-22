@@ -1,6 +1,6 @@
 require('dotenv').config();
 const dns = require('dns');
-dns.setServers(['8.8.8.8', '8.8.4.4']); // Force Google DNS for MongoDB SRV
+dns.setServers(['1.1.1.1', '1.0.0.1']);
 
 const express = require('express');
 const { MongoClient } = require('mongodb');
