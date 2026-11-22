@@ -83,7 +83,6 @@ app.post('/api/generate', promptGuard, async (req, res) => {
   let aiReply = null;
   let isFallback = false;
 
-  // Using Groq API (Free, Fast, Llama 3 model)
   if (process.env.GROQ_API_KEY) {
     try {
       const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -93,7 +92,7 @@ app.post('/api/generate', promptGuard, async (req, res) => {
             'Authorization': `Bearer ${process.env.GROQ_API_KEY}` 
         },
         body: JSON.stringify({ 
-            model: "llama3-8b-8192", 
+            model: "llama-3.1-8b-instant", 
             messages: [{ role: "user", content: userPrompt }] 
         })
       });
@@ -102,16 +101,16 @@ app.post('/api/generate', promptGuard, async (req, res) => {
         const data = await response.json();
         aiReply = data.choices[0].message.content;
       } else {
-        console.log("⚠️ [GROQ] API failed.");
+        const errorData = await response.text();
+        console.log("⚠️ [GROQ] API failed. Status:", response.status, "Response:", errorData);
       }
     } catch (error) {
-      console.log("⚠️ [GROQ] Network error.");
+      console.log("⚠️ [GROQ] Network error:", error.message);
     }
   } else {
     console.log("⚠️ [GROQ] Missing API Key.");
   }
 
-  // Final Fallback (if Groq fails)
   if (!aiReply) {
     aiReply = "I'm experiencing high traffic right now. Please try again soon!";
     isFallback = true;
