@@ -29,7 +29,6 @@ function getKey() {
   return (process.env.GROQ_API_KEY || '').trim().replace(/^["']|["']$/g, '');
 }
 
-// 👇 THIS IS THE AI PERSONALITY
 const systemPrompt = {
   role: "system", 
   content: "You are Hermes, a helpful, witty AI assistant. You must always reply in natural Hinglish (a mix of Hindi and English). Keep your answers concise, engaging, and friendly."
@@ -96,7 +95,7 @@ app.get('/', (req, res) => {
   </div>
   
   <script>
-    const SECURE_PASSWORD = "Hermes@2026"; // 👈 CHANGE YOUR PASSWORD HERE
+    const SECURE_PASSWORD = "NablaAI@99"; // 👈 NEW PASSWORD HERE
 
     if (localStorage.getItem('hermes_pass') === SECURE_PASSWORD) {
       document.getElementById('login-screen').style.display = 'none';
@@ -174,7 +173,7 @@ app.get('/', (req, res) => {
 
 // --- 4. THE AI ENDPOINT (Streaming + DB Save) ---
 app.post('/api/generate', (req, res, next) => {
-  if (req.headers['x-app-password'] !== "Hermes@2026") { 
+  if (req.headers['x-app-password'] !== "NablaAI@99") { // 👈 NEW PASSWORD HERE
     return res.status(401).json({ error: 'Unauthorized.' });
   }
   next();
@@ -192,8 +191,8 @@ app.post('/api/generate', (req, res, next) => {
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
       body: JSON.stringify({
         model: 'openai/gpt-oss-20b', 
-        messages: [systemPrompt, ...messages], // Add personality!
-        stream: true // 👈 Enable streaming
+        messages: [systemPrompt, ...messages], 
+        stream: true 
       }),
     });
 
@@ -222,7 +221,7 @@ app.post('/api/generate', (req, res, next) => {
             const content = data.choices[0]?.delta?.content || "";
             if (content) {
               fullReply += content;
-              res.write(content); // Send to frontend
+              res.write(content); 
             }
           } catch (e) {}
         }
@@ -230,7 +229,6 @@ app.post('/api/generate', (req, res, next) => {
     }
     res.end();
 
-    // Save to MongoDB AFTER the stream is completely finished
     if (chatsCollection && fullReply) {
       chatsCollection.insertOne({ time: new Date(), prompt: userPrompt, reply: fullReply })
         .catch(err => console.log('DB Save Error:', err));
@@ -242,7 +240,7 @@ app.post('/api/generate', (req, res, next) => {
   }
 });
 
-// --- 5. KEEP RENDER AWAKE (Ping every 14 mins) ---
+// --- 5. KEEP RENDER AWAKE ---
 setInterval(() => {
   if (process.env.RENDER_EXTERNAL_URL) {
     fetch(process.env.RENDER_EXTERNAL_URL + '/health').catch(() => {});
