@@ -11,9 +11,9 @@ app.set('trust proxy', 1);
 const port = process.env.PORT || 3000;
 
 // ===================================================================
-//  NABLA JUGAAD (Hinglish AI) - self-creating, self-improving assistant
+//  NABLA AI (Hinglish AI) - self-creating, self-improving assistant
 //  Render env: GROQ_API_KEY, MONGODB_URI, APP_PASSWORD
-//  Optional : SESSION_SECRET, GROQ_MODELS, AUTO_LEARN=off,
+//  Optional : SESSION_SECRET, GROQ_MODELS, GROQ_VISION_MODEL, AUTO_LEARN=off,
 //             AUTO_SKILL=off, REFLECT_EVERY=3
 // ===================================================================
 const APP_PASSWORD = (process.env.APP_PASSWORD || '').trim();
@@ -28,13 +28,17 @@ const MAX_CHARS = 24000;
 const MAX_MEMORIES = 50;
 const MAX_LESSONS = 15;
 const MAX_SKILLS = 30;
+const VISION_MODEL = (process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct').trim();
+const IMG_RE = /^data:image\/jpeg;base64,[A-Za-z0-9+\/=]+$/;
 
 if (!APP_PASSWORD) {
   console.error('❌ APP_PASSWORD env var missing. Set it in Render > Environment.');
   process.exit(1);
 }
 
-app.use(express.json({ limit: '200kb' }));
+const jsonSmall = express.json({ limit: '200kb' });
+const jsonBig = express.json({ limit: '3mb' });
+app.use((req, res, next) => (req.path === '/api/generate' ? jsonBig : jsonSmall)(req, res, next));
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
@@ -118,18 +122,18 @@ const notices = [];
 function notify(text) { notices.push(text); if (notices.length > 10) notices.shift(); }
 
 const prompts = {
-  chat: "You are Nabla Jugaad, a helpful, witty AI assistant who finds smart practical solutions (jugaad). You must always reply in natural Hinglish (a mix of Hindi and English). Keep answers concise, engaging and friendly. Use markdown for formatting.",
-  work: "You are Nabla Jugaad in WORK MODE. You are a highly structured, analytical assistant. Provide detailed, step-by-step answers in professional English using markdown formatting (bullet points, bold text)."
+  chat: "You are Nabla AI, a helpful, witty AI assistant. You must always reply in natural Hinglish (a mix of Hindi and English). Keep answers concise, engaging and friendly. Use markdown for formatting.",
+  work: "You are Nabla AI in WORK MODE. You are a highly structured, analytical assistant. Provide detailed, step-by-step answers in professional English using markdown formatting (bullet points, bold text)."
 };
 
 // ================= GROQ HELPERS =================
 function getKey() { return (process.env.GROQ_API_KEY || '').trim().replace(/^["']|["']$/g, ''); }
 
-async function groqFetch(payload, signal) {
+async function groqFetch(payload, signal, models) {
   const key = getKey();
   if (!key) { const e = new Error('API key missing'); e.status = 500; throw e; }
   let last = 0;
-  for (const model of MODELS) {
+  for (const model of (models || MODELS)) {
     try {
       const body = { ...payload, model };
       if (!model.includes('gpt-oss')) delete body.reasoning_effort;
@@ -201,7 +205,7 @@ function normalizeSkill(out) {
   return { name, triggers, instructions };
 }
 
-// Jugaad engine: Nabla notices a repeatable task style and creates a skill BY ITSELF
+// Self-skill engine: Nabla notices a repeatable task style and creates a skill BY ITSELF
 let reflectTick = 0;
 async function reflectForSkill(userText) {
   const existing = await skills.find().toArray();
@@ -257,7 +261,7 @@ const PAGE = String.raw`<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Nabla Jugaad</title>
+<title>Nabla AI</title>
 <style>
 *{box-sizing:border-box}
 body{background:#0f172a;color:#f8fafc;font-family:Arial,sans-serif;margin:0;display:flex;height:100vh;height:100dvh;overflow:hidden}
@@ -311,7 +315,7 @@ body{background:#0f172a;color:#f8fafc;font-family:Arial,sans-serif;margin:0;disp
 </style>
 </head>
 <body>
-<div id="boot"><div class="logo">Nabla Jugaad</div><div class="sub">SEEKH RAHA HOON...</div></div>
+<div id="boot"><div class="logo">Nabla AI</div><div class="sub">SYSTEM INITIALIZING...</div></div>
 
 <div id="login"><div class="lbox">
 <h2 style="color:#f59e0b;margin-top:0">🔒 Access Required</h2>
@@ -321,7 +325,7 @@ body{background:#0f172a;color:#f8fafc;font-family:Arial,sans-serif;margin:0;disp
 </div></div>
 
 <div id="sidebar">
-<h2 style="color:#f59e0b;margin:0;text-align:center">Nabla Jugaad</h2>
+<h2 style="color:#f59e0b;margin:0;text-align:center">Nabla AI</h2>
 <button class="sb" onclick="newChat()">➕ New Chat</button>
 <select id="proj" onchange="setProject(this.value)"></select>
 <button class="sb" onclick="newProject()">📁 New Project</button>
@@ -337,14 +341,14 @@ body{background:#0f172a;color:#f8fafc;font-family:Arial,sans-serif;margin:0;disp
 <div class="app">
 <div class="header">
 <button class="menu" onclick="toggleSidebar()">☰</button>
-<div id="htitle">⚡ Nabla Jugaad (Hinglish)</div>
+<div id="htitle">⚡ Nabla AI (Hinglish)</div>
 </div>
 <div id="chat"></div>
 <div class="input">
 <button class="ib" onclick="document.getElementById('fileUpload').click()">+</button>
-<input type="file" id="fileUpload" accept=".txt,.json,.js,.md,.csv,.py,.html,.css,.log" onchange="handleFile(event)">
+<input type="file" id="fileUpload" accept=".txt,.json,.js,.md,.csv,.py,.html,.css,.log,image/*" onchange="handleFile(event)">
 <button class="ib" id="micBtn" onclick="startVoice()">🎤</button>
-<input type="text" id="promptInput" placeholder="Message... (/help for commands)" onkeypress="if(event.key==='Enter')onSend()">
+<input type="text" id="promptInput" placeholder="Message Nabla AI... (/help for commands)" onkeypress="if(event.key==='Enter')onSend()">
 <button id="sendBtn" onclick="onSend()">Send</button>
 </div>
 </div>
@@ -352,17 +356,17 @@ body{background:#0f172a;color:#f8fafc;font-family:Arial,sans-serif;margin:0;disp
 <script>
 var $ = function(id){ return document.getElementById(id); };
 var token = ''; try { token = localStorage.getItem('nabla_token') || ''; } catch(e) {}
-var mode = 'chat', projectId = '', attached = '', controller = null, busy = false;
+var mode = 'chat', projectId = '', attached = '', attachedImg = '', controller = null, busy = false;
 try { projectId = localStorage.getItem('nabla_project') || ''; } catch(e) {}
-var history = [];
+var chatLog = [];
 var convId = newId();
 try {
   var saved = JSON.parse(localStorage.getItem('nabla_current'));
-  if (saved && saved.id) { convId = saved.id; history = saved.messages || []; }
+  if (saved && saved.id) { convId = saved.id; chatLog = saved.messages || []; }
 } catch(e) {}
 
 function newId(){ return (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'c' + Date.now() + Math.random().toString(16).slice(2); }
-function persist(){ try { localStorage.setItem('nabla_current', JSON.stringify({ id: convId, messages: history.slice(-60) })); } catch(e) {} }
+function persist(){ try { localStorage.setItem('nabla_current', JSON.stringify({ id: convId, messages: chatLog.slice(-60).map(function(m){ return { role: m.role, content: m.content }; }) })); } catch(e) {} }
 
 // ---------- formatting (escapes HTML first = no XSS) ----------
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -436,8 +440,8 @@ function addActions(div, text, ctx){
 }
 function renderHistory(){
   $('chat').innerHTML = '';
-  if (!history.length) { addMsg('ai', 'Namaste! Main Nabla Jugaad hoon. Main aapse seekhta rehta hoon aur khud naye skills banata hoon. Aaj kya karein? (/help dekho)'); return; }
-  history.forEach(function(m){
+  if (!chatLog.length) { addMsg('ai', 'Namaste! Main Nabla AI hoon. Aaj main aapki kya madad kar sakta hoon? (/help se commands dekho)'); return; }
+  chatLog.forEach(function(m){
     var shown = m.content;
     var i = shown.indexOf('\n\n[FILE CONTENT START]');
     if (i > -1) shown = shown.slice(0, i) + ' 📎';
@@ -446,7 +450,7 @@ function renderHistory(){
 }
 function toggleSidebar(){ $('sidebar').classList.toggle('open'); $('overlay').classList.toggle('open'); }
 function newChat(){
-  history = []; convId = newId(); persist(); renderHistory();
+  chatLog = []; convId = newId(); persist(); renderHistory();
   if ($('sidebar').classList.contains('open')) toggleSidebar();
   loadChats();
 }
@@ -455,15 +459,36 @@ function setMode(m){
   $('btn-chat').classList.toggle('active', m === 'chat');
   $('btn-work').classList.toggle('active', m === 'work');
   var t = $('htitle');
-  t.textContent = m === 'chat' ? '⚡ Nabla Jugaad (Hinglish)' : '💼 Nabla Jugaad (Work Mode)';
+  t.textContent = m === 'chat' ? '⚡ Nabla AI (Hinglish)' : '💼 Nabla AI (Work Mode)';
   t.style.color = m === 'chat' ? '#f59e0b' : '#38bdf8';
   toggleSidebar();
 }
+function loadImage(f){
+  var r = new FileReader();
+  r.onload = function(ev){
+    var img = new Image();
+    img.onload = function(){
+      var k = Math.min(1, 1024 / Math.max(img.width, img.height));
+      var c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      var url = c.toDataURL('image/jpeg', 0.7);
+      if (url.length > 1500000) { addMsg('ai', '⚠️ Image bahut badi hai.'); return; }
+      attachedImg = url; $('promptInput').value += ' [Image: ' + f.name + '] ';
+    };
+    img.onerror = function(){ addMsg('ai', '⚠️ Image read nahi hui.'); };
+    img.src = ev.target.result;
+  };
+  r.readAsDataURL(f);
+}
 function handleFile(e){
   var f = e.target.files[0]; if (!f) return;
-  if (f.size > 300000) { addMsg('ai', '⚠️ File bahut badi hai (max 300KB).'); return; }
+  var isImg = /^image\//.test(f.type) || /\.(png|jpe?g|webp|gif)$/i.test(f.name);
+  var isTxt = /\.(txt|json|js|md|csv|py|html|css|log)$/i.test(f.name);
+  if (isImg) { loadImage(f); e.target.value = ''; return; }
+  if (!isTxt) { addMsg('ai', '⚠️ Sirf image ya text/code file (.txt .json .js .md .csv .py .html .css .log) support hoti hai.'); e.target.value = ''; return; }
+  if (f.size > 300000) { addMsg('ai', '⚠️ File bahut badi hai (max 300KB).'); e.target.value = ''; return; }
   var r = new FileReader();
-  r.onload = function(ev){ attached = ev.target.result; $('promptInput').value += ' [Attached: ' + f.name + '] '; };
+  r.onload = function(ev){ attached = ev.target.result; $('promptInput').value += ' [Attached: ' + f.name + '] '; e.target.value = ''; };
   r.readAsText(f);
 }
 function startVoice(){
@@ -495,7 +520,7 @@ async function loadChats(){
 async function openChat(id){
   try {
     var r = await api('/api/chats/' + id); var c = await r.json();
-    convId = c._id; history = c.messages || []; persist(); renderHistory(); toggleSidebar();
+    convId = c._id; chatLog = c.messages || []; persist(); renderHistory(); toggleSidebar();
   } catch(e) {}
 }
 async function loadProjects(){
@@ -572,7 +597,7 @@ async function runCommand(text){
       addMsg('ai', r6.ok ? '🗑️ Skill delete.' : 'Skill nahi mila.');
     } else if (cmd === '/stats') {
       var st = (await call('/api/stats', 'GET')).j;
-      addMsg('ai', '📊 **Nabla Jugaad ne ab tak seekha**\nFacts: ' + st.facts + '\nLessons: ' + st.lessons + '\nSkills: ' + st.skills + ' (auto: ' + st.auto + ', band: ' + st.disabled + ')\nChats: ' + st.chats);
+      addMsg('ai', '📊 **Nabla AI ne ab tak seekha**\nFacts: ' + st.facts + '\nLessons: ' + st.lessons + '\nSkills: ' + st.skills + ' (auto: ' + st.auto + ', band: ' + st.disabled + ')\nChats: ' + st.chats);
     } else {
       addMsg('ai', 'Unknown command. /help dekho.');
     }
@@ -583,32 +608,46 @@ async function runCommand(text){
 function onSend(){ if (busy) { if (controller) controller.abort(); } else send(false); }
 function regenerate(){
   if (busy) return;
-  while (history.length && history[history.length - 1].role === 'assistant') history.pop();
-  if (!history.length) return;
+  while (chatLog.length && chatLog[chatLog.length - 1].role === 'assistant') chatLog.pop();
+  if (!chatLog.length) return;
   renderHistory(); send(true);
 }
 async function send(regen){
   var input = $('promptInput');
   if (!regen) {
     var text = input.value.trim();
-    if (!text && !attached) return;
+    if (!text && !attached && !attachedImg) return;
     if (text.charAt(0) === '/') { input.value = ''; return runCommand(text); }
-    var content = text;
+    var content = text || (attachedImg ? 'Is image me kya hai?' : '');
     if (attached) content += '\n\n[FILE CONTENT START]\n' + attached.slice(0, 12000) + '\n[FILE CONTENT END]';
-    history.push({ role:'user', content: content });
-    addMsg('user', text || '📎 file');
-    input.value = ''; attached = '';
+    var umsg = { role:'user', content: content };
+    if (attachedImg) umsg.img = attachedImg;
+    chatLog.push(umsg);
+    var ud = addMsg('user', text || (attachedImg ? '🖼️ image' : '📎 file'));
+    if (attachedImg) {
+      var im = document.createElement('img'); im.src = attachedImg;
+      im.style.cssText = 'display:block;max-width:160px;border-radius:6px;margin-top:6px';
+      ud.appendChild(im);
+    }
+    input.value = ''; attached = ''; attachedImg = '';
   }
   busy = true; $('sendBtn').textContent = 'Stop'; $('sendBtn').classList.add('stop');
   var div = addMsg('ai', '...');
   var full = '', used = [];
-  var lastUser = history[history.length - 1].content;
+  var lastUser = chatLog[chatLog.length - 1].content;
   var promptText = lastUser.split('\n\n[FILE CONTENT START]')[0];
   controller = new AbortController();
   try {
     var res = await api('/api/generate', {
       method:'POST', signal: controller.signal,
-      body: JSON.stringify({ convId: convId, messages: history, mode: mode, projectId: projectId })
+      body: JSON.stringify({
+        convId: convId, mode: mode, projectId: projectId,
+        messages: chatLog.map(function(m, i){
+          var o = { role: m.role, content: m.content };
+          if (m.img && i === chatLog.length - 1) o.image = m.img;
+          return o;
+        })
+      })
     });
     if (!res.ok) {
       var er = {}; try { er = await res.json(); } catch(e) {}
@@ -629,7 +668,7 @@ async function send(regen){
     else if (err.message !== 'auth') { div.textContent = '❌ ' + err.message; }
   }
   if (full) {
-    history.push({ role:'assistant', content: full });
+    chatLog.push({ role:'assistant', content: full });
     div.innerHTML = fmt(full);
     addActions(div, full, { prompt: promptText, reply: full, skills: used });
     persist(); loadChats();
@@ -847,10 +886,14 @@ app.post('/api/feedback', auth, needDb, rateLimit('fb', 20, 60000), async (req, 
 function cleanMessages(raw) {
   if (!Array.isArray(raw)) return null;
   const out = [];
-  for (const m of raw.slice(-100)) {
-    if (!m || (m.role !== 'user' && m.role !== 'assistant') || typeof m.content !== 'string') continue;
-    out.push({ role: m.role, content: m.content.slice(0, 20000) });
-  }
+  const part = raw.slice(-100);
+  part.forEach((m, i) => {
+    if (!m || (m.role !== 'user' && m.role !== 'assistant') || typeof m.content !== 'string') return;
+    const e = { role: m.role, content: m.content.slice(0, 20000) };
+    if (i === part.length - 1 && m.role === 'user' && typeof m.image === 'string' &&
+        m.image.length <= 1600000 && IMG_RE.test(m.image)) e.image = m.image;
+    out.push(e);
+  });
   return out.length && out[out.length - 1].role === 'user' ? out : null;
 }
 function trimForAI(msgs) {
@@ -904,11 +947,16 @@ app.post('/api/generate', auth, rateLimit('gen', 25, 60000), async (req, res) =>
 
   let full = '';
   try {
+    const lastMsg = clean[clean.length - 1];
+    const img = lastMsg.image || null;
+    const aiMsgs = trimForAI(clean).map(m => (m === lastMsg && img)
+      ? { role: 'user', content: [{ type: 'text', text: m.content }, { type: 'image_url', image_url: { url: img } }] }
+      : { role: m.role, content: m.content });
     const upstream = await groqFetch({
-      messages: [{ role: 'system', content: sys }, ...trimForAI(clean)],
+      messages: [{ role: 'system', content: sys }, ...aiMsgs],
       stream: true,
       max_tokens: 2048
-    }, ac.signal);
+    }, ac.signal, img ? [VISION_MODEL] : null);
 
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
@@ -940,7 +988,10 @@ app.post('/api/generate', auth, rateLimit('gen', 25, 60000), async (req, res) =>
     console.log('Error:', error.message);
     if (!res.headersSent) {
       const code = error.status === 429 ? 429 : 502;
-      const msg = error.status === 429 ? 'AI limit reached. Thodi der baad try karo.' : 'Error generating response.';
+      const hadImg = !!clean[clean.length - 1].image;
+      const msg = error.status === 429 ? 'AI limit reached. Thodi der baad try karo.'
+        : hadImg ? 'Image wala model kaam nahi kar raha. GROQ_VISION_MODEL check karo.'
+        : 'Error generating response.';
       return res.status(code).json({ error: msg });
     }
     res.write('\n\n⚠️ Connection toot gaya.');
@@ -953,7 +1004,7 @@ app.post('/api/generate', auth, rateLimit('gen', 25, 60000), async (req, res) =>
     chats.updateOne(
       { _id: convId },
       {
-        $set: { messages: [...clean, { role: 'assistant', content: full }].slice(-100), mode, updatedAt: new Date() },
+        $set: { messages: [...clean.map(m => ({ role: m.role, content: m.content })), { role: 'assistant', content: full }].slice(-100), mode, updatedAt: new Date() },
         $setOnInsert: { title, createdAt: new Date() }
       },
       { upsert: true }
@@ -978,4 +1029,4 @@ app.get('/health', (req, res) => res.json({ ok: true, db: dbReady() }));
 process.on('unhandledRejection', e => console.log('Unhandled:', e && e.message));
 process.on('SIGTERM', () => { console.log('Shutting down'); process.exit(0); });
 
-app.listen(port, () => console.log('🚀 Nabla Jugaad running on port ' + port));
+app.listen(port, () => console.log('🚀 Nabla AI running on port ' + port));
