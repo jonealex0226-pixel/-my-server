@@ -14,7 +14,7 @@ const port = process.env.PORT || 3000;
 //  NABLA AI (Hinglish AI) - self-creating, self-improving assistant
 //  Render env: GROQ_API_KEY, MONGODB_URI, APP_PASSWORD
 //  Optional : SESSION_SECRET, GROQ_MODELS, GROQ_VISION_MODEL, AUTO_LEARN=off,
-//             AUTO_SKILL=off, REFLECT_EVERY=3
+//             AUTO_SKILL=off
 // ===================================================================
 const APP_PASSWORD = (process.env.APP_PASSWORD || '').trim();
 const SECRET = process.env.SESSION_SECRET || APP_PASSWORD;
@@ -22,7 +22,6 @@ const MODELS = (process.env.GROQ_MODELS || 'openai/gpt-oss-20b,llama-3.1-8b-inst
   .split(',').map(s => s.trim()).filter(Boolean);
 const AUTO_LEARN = (process.env.AUTO_LEARN || 'on') !== 'off';
 const AUTO_SKILL = (process.env.AUTO_SKILL || 'on') !== 'off';
-const REFLECT_EVERY = Math.max(1, parseInt(process.env.REFLECT_EVERY || '3', 10));
 const MAX_MESSAGES = 20;
 const MAX_CHARS = 24000;
 const MAX_MEMORIES = 50;
@@ -47,7 +46,7 @@ app.use((req, res, next) => {
 });
 
 // ================= DATABASE =================
-let chats, memories, skills, projects;
+let chats, memories, skills, projects, meta;
 const uri = process.env.MONGODB_URI;
 if (uri) {
   const client = new MongoClient(uri);
@@ -58,8 +57,10 @@ if (uri) {
       memories = db.collection('memories');
       skills = db.collection('skills');
       projects = db.collection('projects');
+      meta = db.collection('meta');
       await chats.createIndex({ updatedAt: -1 }).catch(() => {});
       await memories.createIndex({ time: -1 }).catch(() => {});
+      await seedSkills().catch(e => console.log('Seed error:', e.message));
       console.log('✅ Connected to MongoDB');
     })
     .catch(err => console.log('❌ MongoDB Error:', err.message));
@@ -169,33 +170,7 @@ async function groqJSON(messages, maxTokens = 1200) {
   } catch (e) { return null; }
 }
 
-// ================= SELF-LEARNING 1: MEMORY =================
-async function learnFromExchange(userText) {
-  if (!AUTO_LEARN || !dbReady() || userText.length < 15) return;
-  const out = await groqJSON([
-    {
-      role: 'system',
-      content: 'Extract durable personal facts or preferences the USER stated about themselves (name, job, location, tools, goals, likes). Return ONLY a JSON array of up to 3 short strings, or []. Never include passwords, keys, OTPs, ID or card numbers.'
-    },
-    { role: 'user', content: userText.slice(0, 1500) }
-  ], 600);
-  if (!Array.isArray(out)) return;
-  const existing = (await memories.find().toArray()).map(m => m.fact.toLowerCase());
-  for (const f of out.slice(0, 3)) {
-    if (typeof f !== 'string') continue;
-    const fact = f.trim().slice(0, 200);
-    if (fact.length < 4 || SECRET_LIKE.test(fact) || existing.includes(fact.toLowerCase())) continue;
-    await memories.insertOne({ _id: crypto.randomUUID(), fact, type: 'fact', time: new Date(), auto: true });
-    notify('💾 Yaad kar liya: ' + fact);
-  }
-  const facts = await memories.find({ type: { $ne: 'lesson' } }).sort({ time: 1 }).toArray();
-  if (facts.length > MAX_MEMORIES) {
-    const old = facts.slice(0, facts.length - MAX_MEMORIES);
-    await memories.deleteMany({ _id: { $in: old.map(o => o._id) } });
-  }
-}
-
-// ================= SELF-LEARNING 2: SKILLS =================
+// ================= SELF-LEARNING BRAIN =================
 function normalizeSkill(out) {
   if (!out || typeof out.name !== 'string' || !Array.isArray(out.triggers) || typeof out.instructions !== 'string') return null;
   const name = out.name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
@@ -205,27 +180,149 @@ function normalizeSkill(out) {
   return { name, triggers, instructions };
 }
 
-// Self-skill engine: Nabla notices a repeatable task style and creates a skill BY ITSELF
-let reflectTick = 0;
-async function reflectForSkill(userText) {
-  const existing = await skills.find().toArray();
-  if (existing.length >= MAX_SKILLS) return;
+const escRe = t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// trigger must start at a word boundary ("plan" matches "planning", not "explanation")
+function matchesTrigger(lowered, t) {
+  try { return new RegExp('(^|[^\\p{L}\\p{N}])' + escRe(t), 'u').test(lowered); }
+  catch (e) { return lowered.includes(t); }
+}
+
+async function saveSkill(sk, extra) {
+  await skills.updateOne(
+    { _id: sk.name },
+    {
+      $set: { ...sk, disabled: false, ...extra },
+      $setOnInsert: { createdAt: new Date(), uses: 0, score: 0, version: 1 }
+    },
+    { upsert: true }
+  );
+}
+
+// Starter skills so Nabla is useful from day one (seeded once; /unlearn stays deleted)
+const STARTERS = [
+  { name: 'email-writer', triggers: ['email', 'mail likh', 'draft mail', 'letter'], instructions: 'Write clear emails: subject line, greeting, short body, polite closing. Match the requested tone. Only ask a question if a key detail is missing.' },
+  { name: 'code-helper', triggers: ['code', 'bug', 'error', 'function', 'script'], instructions: 'For code: give working code in fenced blocks, explain briefly what it does, point out likely bugs and edge cases, keep explanations short.' },
+  { name: 'summarizer', triggers: ['summary', 'summarize', 'saransh', 'tl;dr'], instructions: 'Summarize in 3-5 bullets first, then a one-line takeaway. Keep key numbers and names.' },
+  { name: 'explain-simple', triggers: ['samjhao', 'explain', 'eli5', 'simple me'], instructions: 'Explain with a simple everyday example first, then the details. Avoid jargon.' },
+  { name: 'planner', triggers: ['plan', 'schedule', 'roadmap', 'timetable'], instructions: 'Give a step-by-step plan with realistic time estimates and a clear first action.' },
+  { name: 'study-notes', triggers: ['notes', 'revise', 'exam', 'padhai'], instructions: 'Make concise revision notes: headings, key points, one example, and 3 quick practice questions.' },
+  { name: 'translator', triggers: ['translate', 'anuvad', 'hindi me', 'english me'], instructions: 'Translate faithfully, keep tone and names, and mention alternate phrasing only if the meaning is ambiguous.' },
+  { name: 'compare-decide', triggers: ['compare', 'comparison', 'better option'], instructions: 'Compare options in a small table, then give a clear recommendation with reasons.' }
+];
+async function seedSkills() {
+  if (!meta || await meta.findOne({ _id: 'seed_v1' })) return;
+  for (const st of STARTERS) {
+    await skills.updateOne(
+      { _id: st.name },
+      { $setOnInsert: { ...st, auto: false, seed: true, disabled: false, uses: 0, score: 0, version: 1, createdAt: new Date() } },
+      { upsert: true }
+    );
+  }
+  await meta.insertOne({ _id: 'seed_v1', time: new Date() });
+  console.log('🌱 Starter skills seeded');
+}
+
+// ONE background call after each reply learns three things:
+//  facts (about the user), lessons (when the user corrects the AI), skills (reusable task styles)
+let learnBusy = false;
+const FEEDBACK_RE = /(galat|wrong|nahi chahiye|bekar|bakwas|accha|achha|badhiya|perfect|sahi|great|good|thanks|shukriya|dhanyavad|pasand)/i;
+async function learnFromExchange(userText, prevReply, prevSkills, prevUser) {
+  if ((!AUTO_LEARN && !AUTO_SKILL) || !dbReady() || learnBusy) return;
+  if (userText.length < 12 && !FEEDBACK_RE.test(userText)) return;
+  learnBusy = true;
+  try {
+    const existing = await skills.find().toArray();
+    const out = await groqJSON([
+      {
+        role: 'system',
+        content: 'You are the learning module of an AI assistant. Read the USER message (and the assistant previous reply, if given) and return ONLY a JSON object: {"facts":[up to 3 short durable facts or preferences the user stated about themselves, or empty],"lesson":null or one generic sentence starting with "Next time" (max 140 chars) ONLY if the user is correcting, complaining about or redirecting the previous reply,"skill":null or {"name":"short-kebab-case","triggers":["3 to 6 lowercase keywords or phrases"],"instructions":"imperative guidance, max 600 chars"} ONLY if the request shows a reusable task type or style that deserves a permanent skill and is not already covered,"feedback":null or "positive" or "negative" — whether the user is clearly praising or criticizing the assistant previous reply}. Never include passwords, keys, OTPs, ID or card numbers. Existing skills: ' +
+          JSON.stringify(existing.map(x => ({ name: x.name, triggers: x.triggers })))
+      },
+      { role: 'user', content: JSON.stringify({ user: userText.slice(0, 1200), previous_reply: String(prevReply || '').slice(0, 400) }) }
+    ]);
+    if (!out || typeof out !== 'object' || Array.isArray(out)) return;
+
+    if (AUTO_LEARN) {
+      const mem = await memories.find().toArray();
+      const known = mem.map(m => m.fact.toLowerCase());
+      for (const f of (Array.isArray(out.facts) ? out.facts : []).slice(0, 3)) {
+        if (typeof f !== 'string') continue;
+        const fact = f.trim().slice(0, 200);
+        if (fact.length < 4 || SECRET_LIKE.test(fact) || known.includes(fact.toLowerCase())) continue;
+        await memories.insertOne({ _id: crypto.randomUUID(), fact, type: 'fact', time: new Date(), auto: true });
+        notify('💾 Yaad kar liya: ' + fact);
+      }
+      const lesson = typeof out.lesson === 'string' ? out.lesson.trim().slice(0, 160) : '';
+      if (lesson.length >= 8 && !isBad(lesson) && !SECRET_LIKE.test(lesson) && !known.includes(lesson.toLowerCase())) {
+        await memories.insertOne({ _id: crypto.randomUUID(), fact: lesson, type: 'lesson', time: new Date(), auto: true });
+        notify('📘 Sudhar seekha: ' + lesson);
+      }
+      const facts = await memories.find({ type: { $ne: 'lesson' } }).sort({ time: 1 }).toArray();
+      if (facts.length > MAX_MEMORIES) {
+        await memories.deleteMany({ _id: { $in: facts.slice(0, facts.length - MAX_MEMORIES).map(o => o._id) } });
+      }
+      const lessons = await memories.find({ type: 'lesson' }).sort({ time: 1 }).toArray();
+      if (lessons.length > MAX_LESSONS) {
+        await memories.deleteMany({ _id: { $in: lessons.slice(0, lessons.length - MAX_LESSONS).map(o => o._id) } });
+      }
+    }
+
+    // implicit feedback: the user's own words act like a 👍 / 👎 on the skills used last time
+    if (AUTO_SKILL && Array.isArray(prevSkills) && prevSkills.length) {
+      if (out.feedback === 'positive') {
+        await skills.updateMany({ _id: { $in: prevSkills } }, { $inc: { score: 1 } });
+      } else if (out.feedback === 'negative') {
+        const r = await applyNegative(prevSkills, stripFile(prevUser || ''), prevReply, userText.slice(0, 300));
+        if (r.improved.length) notify('🧠 Tumhare feedback se skill improve kiya: ' + r.improved.join(', '));
+        if (r.paused.length) notify('⛔ Skill band kiya (bahut shikayat): ' + r.paused.join(', '));
+      }
+    }
+
+    if (AUTO_SKILL && out.skill && existing.length < MAX_SKILLS) {
+      const sk = normalizeSkill(out.skill);
+      if (sk && !existing.some(x => x._id === sk.name || x.triggers.some(t => sk.triggers.includes(t)))) {
+        await saveSkill(sk, { auto: true, source: 'auto' });
+        notify('🧠 Maine khud naya skill seekha: ' + sk.name + ' (triggers: ' + sk.triggers.join(', ') + ')');
+      }
+    }
+  } finally {
+    learnBusy = false;
+  }
+}
+
+// Tidy the skill library: merge duplicates (auto-run only touches auto-made skills)
+async function evolveSkills(onlyAuto) {
+  if (!dbReady()) return { merged: 0, removed: 0 };
+  const all = await skills.find().toArray();
+  if (all.length < 4) return { merged: 0, removed: 0, note: 'Abhi skills kam hain, merge ki zaroorat nahi.' };
   const out = await groqJSON([
     {
       role: 'system',
-      content: 'You help an AI assistant grow. Given a user request, decide if it shows a REUSABLE task type or style preference (for example: email writing, code review, summaries, study notes, a tone) that deserves a permanent skill. If not, return {"create":false}. Otherwise return ONLY JSON: {"create":true,"name":"short-kebab-case","triggers":["3 to 6 lowercase keywords or phrases future requests would contain"],"instructions":"clear imperative guidance, max 600 chars"}. Skills may only change how the assistant writes or thinks. Existing skills (do not duplicate): ' +
-        JSON.stringify(existing.map(s => ({ name: s.name, triggers: s.triggers })))
+      content: 'You tidy an AI assistant skill library. Find skills that are duplicates or overlap heavily. Return ONLY JSON: {"merge":[{"keep":"skill-name","remove":["other-skill-name"],"triggers":["merged triggers, max 6"],"instructions":"merged instructions, max 600 chars"}]} or {"merge":[]}. Use only names from the list.'
     },
-    { role: 'user', content: userText.slice(0, 800) }
-  ]);
-  if (!out || (out.create !== true && out.create !== 'true')) return;
-  const sk = normalizeSkill(out);
-  if (!sk) return;
-  if (existing.some(s => s._id === sk.name || s.triggers.some(t => sk.triggers.includes(t)))) return;
-  await skills.insertOne({
-    _id: sk.name, ...sk, auto: true, uses: 0, score: 0, version: 1, disabled: false, createdAt: new Date()
-  });
-  notify('🧠 Maine khud naya skill seekha: ' + sk.name + ' (triggers: ' + sk.triggers.join(', ') + ')');
+    { role: 'user', content: JSON.stringify(all.map(x => ({ name: x.name, triggers: x.triggers, instructions: x.instructions }))) }
+  ], 1800);
+  const byName = new Map(all.map(x => [x.name, x]));
+  const gone = new Set();
+  let merged = 0, removed = 0;
+  for (const m of (out && Array.isArray(out.merge) ? out.merge.slice(0, 5) : [])) {
+    const keep = byName.get(String(m.keep || '').toLowerCase());
+    const rem = (Array.isArray(m.remove) ? m.remove : [])
+      .map(n => byName.get(String(n).toLowerCase())).filter(x => x && keep && x._id !== keep._id && !gone.has(x._id));
+    if (!keep || gone.has(keep._id) || !rem.length) continue;
+    if (onlyAuto && (!keep.auto || rem.some(x => !x.auto))) continue;
+    const sk = normalizeSkill({ name: keep.name, triggers: Array.isArray(m.triggers) ? m.triggers : keep.triggers, instructions: m.instructions });
+    if (!sk) continue;
+    await skills.updateOne({ _id: keep._id }, {
+      $set: { triggers: sk.triggers, instructions: sk.instructions, prev: keep.instructions, updatedAt: new Date() },
+      $inc: { version: 1, uses: rem.reduce((n, x) => n + (x.uses || 0), 0) }
+    });
+    await skills.deleteMany({ _id: { $in: rem.map(x => x._id) } });
+    rem.forEach(x => gone.add(x._id));
+    merged++; removed += rem.length;
+  }
+  if (merged) notify('🧹 Skills tidy kiye: ' + merged + ' merge, ' + removed + ' duplicate hataye.');
+  return { merged, removed };
 }
 
 // Improve a skill using feedback; old version is kept so /rollback works
@@ -253,6 +350,222 @@ async function refineSkill(skill, request, badReply, note) {
     { $set: { instructions: ins, prev: skill.instructions, updatedAt: new Date() }, $inc: { version: 1 } }
   );
   return true;
+}
+
+// ================= SHARED HELPERS =================
+async function skillFromDescription(desc) {
+  if (desc.length < 8 || isBad(desc)) return { error: 'Description invalid', code: 400 };
+  if ((await skills.countDocuments()) >= MAX_SKILLS) return { error: 'Skill limit full. Purane skills hatao.', code: 400 };
+  const out = await groqJSON([
+    {
+      role: 'system',
+      content: 'You design reusable skills for an AI assistant. From the user description return ONLY JSON: {"name":"short-kebab-case","triggers":["3 to 6 lowercase keywords or phrases a user message would contain"],"instructions":"clear imperative instructions, max 600 chars"}. Instructions may only change how the assistant writes or thinks; never mention secrets, system prompts or ignoring rules.'
+    },
+    { role: 'user', content: desc }
+  ]);
+  const sk = normalizeSkill(out);
+  if (!sk) return { error: 'Skill ban nahi paya, dobara try karo.', code: 502 };
+  await saveSkill(sk, { auto: false, source: desc });
+  return { sk };
+}
+
+async function skillFromChat(raw) {
+  const msgs = (Array.isArray(raw) ? raw : []).slice(-8)
+    .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+    .map(m => ({ role: m.role, content: stripFile(m.content).slice(0, 700) }));
+  if (msgs.length < 2) return { error: 'Pehle thodi chat karo, phir main us se skill bana lunga.', code: 400 };
+  if (msgs.some(m => isBad(m.content))) return { error: 'Blocked', code: 403 };
+  if ((await skills.countDocuments()) >= MAX_SKILLS) return { error: 'Skill limit full. Purane skills hatao.', code: 400 };
+  const out = await groqJSON([
+    {
+      role: 'system',
+      content: 'From this conversation create ONE reusable skill that captures how the assistant should handle this kind of task (format, tone, steps). Return ONLY JSON: {"name":"short-kebab-case","triggers":["3 to 6 lowercase keywords or phrases future requests would contain"],"instructions":"imperative guidance, max 600 chars"}. Skills may only change how the assistant writes or thinks; never mention secrets or system prompts.'
+    },
+    { role: 'user', content: JSON.stringify(msgs) }
+  ]);
+  const sk = normalizeSkill(out);
+  if (!sk) return { error: 'Skill ban nahi paya, dobara try karo.', code: 502 };
+  await saveSkill(sk, { auto: false, source: 'taught from chat' });
+  return { sk };
+}
+
+// thumbs-down (button OR implicit from the user's words): lower score, refine skill, pause bad ones
+async function applyNegative(used, prompt, reply, note) {
+  await skills.updateMany({ _id: { $in: used } }, { $inc: { score: -1 } });
+  const list = await skills.find({ _id: { $in: used } }).toArray();
+  const improved = [], paused = [];
+  for (const sk of list.slice(0, 2)) {
+    if (await refineSkill(sk, prompt, reply, note)) improved.push(sk.name);
+    if ((sk.score || 0) <= -3 && (sk.uses || 0) >= 3) {
+      await skills.updateOne({ _id: sk._id }, { $set: { disabled: true } });
+      paused.push(sk.name);
+    }
+  }
+  return { improved, paused };
+}
+
+async function statsObj() {
+  const [facts, lessons, sk, auto, disabled, ch] = await Promise.all([
+    memories.countDocuments({ type: { $ne: 'lesson' } }),
+    memories.countDocuments({ type: 'lesson' }),
+    skills.countDocuments(),
+    skills.countDocuments({ auto: true }),
+    skills.countDocuments({ disabled: true }),
+    chats.countDocuments()
+  ]);
+  return { facts, lessons, skills: sk, auto, disabled, chats: ch };
+}
+
+function saveChat(convId, clean, mode, full) {
+  if (!full || !dbReady()) return;
+  const title = stripFile(clean[0].content).slice(0, 40) || 'Chat';
+  chats.updateOne(
+    { _id: convId },
+    {
+      $set: { messages: [...clean.map(m => ({ role: m.role, content: m.content })), { role: 'assistant', content: full }].slice(-100), mode, updatedAt: new Date() },
+      $setOnInsert: { title, createdAt: new Date() }
+    },
+    { upsert: true }
+  ).catch(err => console.log('DB Save Error:', err.message));
+}
+
+// ================= NATURAL-LANGUAGE CONTROL (no slash commands needed) =================
+// The user just talks: "ye yaad rakho...", "email wala skill hata do", "skills dikhao"...
+const INTENT_RE = /(skill|seekh|sikh|learn|yaad|yad rakh|remember|memory|bhool|bhul|forget|hata|delete|remove|mita|improve|sudhar|rollback|tidy|merge|evolve|stats|what do you know)/i;
+const YES_RE = /^\s*(haan|han|ha|hanji|yes|y|yep|ok|okay|kar do|kardo|pakka|confirm|sure)\b/i;
+const NO_RE = /^\s*(nahi|nahin|na|no|n|cancel|ruko|mat karo|rehne do)\b/i;
+const pending = new Map(); // convId -> { run, exp }   (confirmation for destructive actions)
+const STOP_TOK = new Set(['skill', 'skills', 'wala', 'wali', 'wale', 'the', 'ko', 'ka', 'ki', 'hata', 'delete', 'remove', 'kar', 'karo', 'bhool', 'jao', 'baat']);
+
+function tokens(t) { return String(t || '').toLowerCase().split(/[^a-z0-9]+/).filter(x => x.length >= 3 && !STOP_TOK.has(x)); }
+
+async function resolveSkill(q) {
+  const key = String(q || '').toLowerCase().trim();
+  if (!key) return null;
+  const all = await skills.find().toArray();
+  const slug = key.replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  const exact = all.find(x => x._id === slug);
+  if (exact) return exact;
+  const toks = tokens(key);
+  let best = null, bestScore = 0, tie = false;
+  for (const sk of all) {
+    const hay = (sk.name + ' ' + sk.triggers.join(' ')).toLowerCase();
+    const sc = toks.filter(t => hay.includes(t)).length;
+    if (sc > bestScore) { best = sk; bestScore = sc; tie = false; } else if (sc === bestScore && sc > 0) tie = true;
+  }
+  return best && !tie ? best : null;
+}
+
+async function handleIntent(own, clean, convId, hasImage) {
+  if (!dbReady() || hasImage) return null;
+
+  // 1) answer to a pending "pakka?" question
+  const pend = pending.get(convId);
+  if (pend) {
+    pending.delete(convId);
+    if (pend.exp > Date.now()) {
+      if (YES_RE.test(own)) return await pend.run();
+      if (NO_RE.test(own)) return 'Theek hai, cancel kar diya. 👍';
+    }
+  }
+
+  // 2) cheap pre-filter, then ask the model what the user really wants
+  if (own.length > 400 || !INTENT_RE.test(own)) return null;
+  const prevA = clean.length >= 2 && clean[clean.length - 2].role === 'assistant' ? clean[clean.length - 2].content : '';
+  const names = (await skills.find().toArray()).map(x => x.name);
+  const r = await groqJSON([
+    {
+      role: 'system',
+      content: 'You route messages for an AI assistant called Nabla AI. Decide if the user is asking the assistant to manage ITS OWN memory or skills (not asking a normal question or task). Return ONLY JSON {"intent":"...","arg":"...","name":"..."}. Intents: chat (DEFAULT for any normal question, task or when unsure), remember (user wants a fact remembered; arg = the fact), show_memory, forget_all (wipe ALL memory), forget_one (forget one remembered thing; arg = which), learn_skill (user describes a new permanent behaviour or skill; arg = description), teach_from_chat (turn this conversation into a skill), show_skills, delete_skill (name = skill name or description), improve_skill (name = skill, arg = what to improve), rollback_skill (name), enable_skill (name), evolve (tidy or merge skills), stats (how much has it learned). Existing skills: ' + JSON.stringify(names)
+    },
+    { role: 'user', content: JSON.stringify({ message: own, previous_assistant_reply: prevA.slice(0, 300) }) }
+  ], 500);
+  if (!r || typeof r.intent !== 'string' || r.intent === 'chat') return null;
+  const arg = String(r.arg || '').trim().slice(0, 600);
+  const name = String(r.name || '').trim().slice(0, 60);
+  const ask = (text, run) => { pending.set(convId, { run, exp: Date.now() + 120000 }); return text; };
+
+  switch (r.intent) {
+    case 'remember': {
+      const fact = arg.slice(0, 200);
+      if (SECRET_LIKE.test(fact)) return '🔒 Passwords ya secrets main yaad nahi rakhta.';
+      if (fact.length < 3 || isBad(fact)) return null;
+      await memories.insertOne({ _id: crypto.randomUUID(), fact, type: 'fact', time: new Date(), auto: false });
+      return '✅ Yaad kar liya: ' + fact;
+    }
+    case 'show_memory': {
+      const mem = await memories.find().sort({ time: -1 }).limit(40).toArray();
+      return mem.length ? mem.map(m => (m.type === 'lesson' ? '📘 ' : '• ') + m.fact).join('\n') : 'Abhi mujhe kuch yaad nahi hai.';
+    }
+    case 'forget_all':
+      return ask('⚠️ Saari memory delete kar du? "haan" bolo ya "nahi".', async () => {
+        await memories.deleteMany({});
+        return '🗑️ Saari memory delete ho gayi.';
+      });
+    case 'forget_one': {
+      const toks = tokens(arg);
+      const mem = await memories.find().toArray();
+      let best = null, bs = 0;
+      for (const m of mem) {
+        const sc = toks.filter(t => m.fact.toLowerCase().includes(t)).length;
+        if (sc > bs) { best = m; bs = sc; }
+      }
+      if (!best) return 'Aisi koi baat mujhe yaad nahi mili.';
+      return ask('⚠️ Yeh bhool jau? "' + best.fact + '" — "haan" ya "nahi".', async () => {
+        await memories.deleteOne({ _id: best._id });
+        return '🗑️ Bhool gaya.';
+      });
+    }
+    case 'learn_skill': {
+      const res = await skillFromDescription(arg || own);
+      return res.error ? '⚠️ ' + res.error : '✅ Naya skill seekh liya: **' + res.sk.name + '**\nTriggers: ' + res.sk.triggers.join(', ');
+    }
+    case 'teach_from_chat': {
+      const res = await skillFromChat(clean.slice(0, -1));
+      return res.error ? '⚠️ ' + res.error : '✅ Is chat se skill ban gaya: **' + res.sk.name + '**\nTriggers: ' + res.sk.triggers.join(', ');
+    }
+    case 'show_skills': {
+      const all = await skills.find().sort({ createdAt: -1 }).toArray();
+      return all.length ? all.map(x => '• **' + x.name + '** v' + (x.version || 1) + (x.auto ? ' 🤖auto' : '') + (x.disabled ? ' ⛔band' : '') + ' | used ' + (x.uses || 0) + 'x | ' + x.triggers.join(', ')).join('\n') : 'Abhi koi skill nahi hai.';
+    }
+    case 'delete_skill': {
+      const sk = await resolveSkill(name || arg);
+      if (!sk) return 'Kaunsa skill hatana hai? Naam thoda aur saaf batao (ya "skills dikhao" bolo).';
+      return ask('⚠️ Skill **' + sk.name + '** delete kar du? "haan" ya "nahi".', async () => {
+        await skills.deleteOne({ _id: sk._id });
+        return '🗑️ Skill **' + sk.name + '** delete ho gaya.';
+      });
+    }
+    case 'improve_skill': {
+      const sk = await resolveSkill(name);
+      if (!sk) return 'Kaunsa skill improve karna hai? Naam batao.';
+      if (arg.length < 5 || isBad(arg)) return 'Kya behtar karna hai, thoda detail me batao.';
+      return (await refineSkill(sk, '', '', arg)) ? '🧠 Skill **' + sk.name + '** improve ho gaya.' : '⚠️ Improve nahi ho paya, dobara try karo.';
+    }
+    case 'rollback_skill': {
+      const sk = await resolveSkill(name);
+      if (!sk) return 'Kaunsa skill? Naam batao.';
+      if (!sk.prev) return 'Is skill ka purana version nahi hai.';
+      await skills.updateOne({ _id: sk._id }, { $set: { instructions: sk.prev, prev: sk.instructions, updatedAt: new Date() }, $inc: { version: 1 } });
+      return '↩️ Skill **' + sk.name + '** ka purana version wapas aa gaya.';
+    }
+    case 'enable_skill': {
+      const sk = await resolveSkill(name);
+      if (!sk) return 'Kaunsa skill chalu karna hai? Naam batao.';
+      await skills.updateOne({ _id: sk._id }, { $set: { disabled: false, score: 0 } });
+      return '✅ Skill **' + sk.name + '** chalu ho gaya.';
+    }
+    case 'evolve': {
+      const e = await evolveSkills(false);
+      return e.note || ('🧹 ' + e.merged + ' merge, ' + e.removed + ' duplicate hataye.');
+    }
+    case 'stats': {
+      const st = await statsObj();
+      return '📊 **Nabla AI ne ab tak seekha**\nFacts: ' + st.facts + '\nLessons: ' + st.lessons + '\nSkills: ' + st.skills + ' (auto: ' + st.auto + ', band: ' + st.disabled + ')\nChats: ' + st.chats;
+    }
+    default:
+      return null;
+  }
 }
 
 // ================= FRONTEND =================
@@ -356,7 +669,7 @@ body{background:#0f172a;color:#f8fafc;font-family:Arial,sans-serif;margin:0;disp
 <script>
 var $ = function(id){ return document.getElementById(id); };
 var token = ''; try { token = localStorage.getItem('nabla_token') || ''; } catch(e) {}
-var mode = 'chat', projectId = '', attached = '', attachedImg = '', controller = null, busy = false;
+var mode = 'chat', projectId = '', attached = '', attachedImg = '', controller = null, busy = false, lastUsed = [];
 try { projectId = localStorage.getItem('nabla_project') || ''; } catch(e) {}
 var chatLog = [];
 var convId = newId();
@@ -440,7 +753,7 @@ function addActions(div, text, ctx){
 }
 function renderHistory(){
   $('chat').innerHTML = '';
-  if (!chatLog.length) { addMsg('ai', 'Namaste! Main Nabla AI hoon. Aaj main aapki kya madad kar sakta hoon? (/help se commands dekho)'); return; }
+  if (!chatLog.length) { addMsg('ai', 'Namaste! Main Nabla AI hoon. Aaj main aapki kya madad kar sakta hoon? (Seedha bolo, jaise \"ye yaad rakho...\" ya \"skills dikhao\")'); return; }
   chatLog.forEach(function(m){
     var shown = m.content;
     var i = shown.indexOf('\n\n[FILE CONTENT START]');
@@ -450,7 +763,7 @@ function renderHistory(){
 }
 function toggleSidebar(){ $('sidebar').classList.toggle('open'); $('overlay').classList.toggle('open'); }
 function newChat(){
-  chatLog = []; convId = newId(); persist(); renderHistory();
+  chatLog = []; lastUsed = []; convId = newId(); persist(); renderHistory();
   if ($('sidebar').classList.contains('open')) toggleSidebar();
   loadChats();
 }
@@ -520,7 +833,7 @@ async function loadChats(){
 async function openChat(id){
   try {
     var r = await api('/api/chats/' + id); var c = await r.json();
-    convId = c._id; chatLog = c.messages || []; persist(); renderHistory(); toggleSidebar();
+    convId = c._id; chatLog = c.messages || []; lastUsed = []; persist(); renderHistory(); toggleSidebar();
   } catch(e) {}
 }
 async function loadProjects(){
@@ -558,7 +871,7 @@ async function runCommand(text){
   }
   try {
     if (cmd === '/help') {
-      addMsg('ai', '**Commands**\n/remember <fact>\n/memory - facts + lessons\n/forget - saari memory delete\n/learn <description> - naya skill banwao\n/skills - skills list\n/improve <skill> <feedback> - skill behtar karo\n/rollback <skill> - purana version wapas\n/enable <skill> - band skill chalu\n/unlearn <skill> - delete\n/stats - kitna seekha\n\nMain khud bhi naye skills banata hoon aur 👍/👎 se improve hota hoon.');
+      addMsg('ai', '**Seedha bolo, commands ki zaroorat nahi:**\n"ye yaad rakho ki main Delhi me rehta hoon"\n"meri memory dikhao" / "sab bhool jao"\n"email wala skill hata do"\n"naya skill seekho: har jawab me ek example do"\n"is chat se skill bana lo"\n"skills dikhao" / "skills tidy karo" / "kitna seekha?"\n\nMain khud bhi seekhta hoon: jab tum "galat hai" ya "perfect" bolte ho to wo bhi samajh leta hoon.\n\n**Slash commands (optional)**\n/remember <fact>\n/memory - facts + lessons\n/forget - saari memory delete\n/learn <description> - naya skill banwao\n/teach - is chat se skill banao\n/evolve - skills ko tidy/merge karo\n/skills - skills list\n/improve <skill> <feedback> - skill behtar karo\n/rollback <skill> - purana version wapas\n/enable <skill> - band skill chalu\n/unlearn <skill> - delete\n/stats - kitna seekha\n\nMain khud bhi naye skills banata hoon aur 👍/👎 se improve hota hoon.');
     } else if (cmd === '/remember') {
       if (!arg) return addMsg('ai', 'Kya yaad rakhna hai? /remember <fact>');
       var r1 = await call('/api/memory', 'POST', { fact: arg });
@@ -575,6 +888,16 @@ async function runCommand(text){
       var d = addMsg('ai', '🧠 Naya skill bana raha hoon...');
       var r2 = await call('/api/skills/learn', 'POST', { description: arg });
       d.innerHTML = fmt(r2.ok ? '✅ Skill ban gaya: **' + r2.j.name + '**\nTriggers: ' + r2.j.triggers.join(', ') : '⚠️ ' + (r2.j.error || 'Fail'));
+    } else if (cmd === '/teach') {
+      if (chatLog.length < 2) return addMsg('ai', 'Pehle thodi chat karo, phir /teach.');
+      var d3 = addMsg('ai', '🧠 Is chat se skill bana raha hoon...');
+      var tm = chatLog.slice(-8).map(function(m){ return { role: m.role, content: m.content.split('\n\n[FILE CONTENT START]')[0] }; });
+      var r7 = await call('/api/skills/from-chat', 'POST', { messages: tm });
+      d3.innerHTML = fmt(r7.ok ? '✅ Skill ban gaya: **' + r7.j.name + '**\nTriggers: ' + r7.j.triggers.join(', ') : '⚠️ ' + (r7.j.error || 'Fail'));
+    } else if (cmd === '/evolve') {
+      var d4 = addMsg('ai', '🧹 Skills tidy kar raha hoon...');
+      var r8 = await call('/api/evolve', 'POST');
+      d4.innerHTML = fmt(r8.ok ? (r8.j.note || ('✅ ' + r8.j.merged + ' merge, ' + r8.j.removed + ' duplicate hataye.')) : '⚠️ ' + (r8.j.error || 'Fail'));
     } else if (cmd === '/skills') {
       var s = (await call('/api/skills', 'GET')).j;
       addMsg('ai', (Array.isArray(s) && s.length) ? s.map(function(x){
@@ -641,7 +964,7 @@ async function send(regen){
     var res = await api('/api/generate', {
       method:'POST', signal: controller.signal,
       body: JSON.stringify({
-        convId: convId, mode: mode, projectId: projectId,
+        convId: convId, mode: mode, projectId: projectId, prevSkills: lastUsed,
         messages: chatLog.map(function(m, i){
           var o = { role: m.role, content: m.content };
           if (m.img && i === chatLog.length - 1) o.image = m.img;
@@ -671,8 +994,10 @@ async function send(regen){
     chatLog.push({ role:'assistant', content: full });
     div.innerHTML = fmt(full);
     addActions(div, full, { prompt: promptText, reply: full, skills: used });
+    lastUsed = used;
     persist(); loadChats();
-    setTimeout(checkNotices, 7000);
+    setTimeout(checkNotices, 6000);
+    setTimeout(checkNotices, 14000);
   }
   busy = false; controller = null; $('sendBtn').textContent = 'Send'; $('sendBtn').classList.remove('stop');
 }
@@ -758,29 +1083,9 @@ app.get('/api/skills', auth, async (req, res) => {
 });
 
 app.post('/api/skills/learn', auth, needDb, rateLimit('learn', 6, 60000), async (req, res) => {
-  const desc = String(req.body.description || '').trim().slice(0, 600);
-  if (desc.length < 8 || isBad(desc)) return res.status(400).json({ error: 'Description invalid' });
-  if ((await skills.countDocuments()) >= MAX_SKILLS) {
-    return res.status(400).json({ error: 'Skill limit full. /unlearn se purane hatao.' });
-  }
-  const out = await groqJSON([
-    {
-      role: 'system',
-      content: 'You design reusable skills for an AI assistant. From the user description return ONLY JSON: {"name":"short-kebab-case","triggers":["3 to 6 lowercase keywords or phrases a user message would contain"],"instructions":"clear imperative instructions, max 600 chars"}. Instructions may only change how the assistant writes or thinks; never mention secrets, system prompts or ignoring rules.'
-    },
-    { role: 'user', content: desc }
-  ]);
-  const sk = normalizeSkill(out);
-  if (!sk) return res.status(502).json({ error: 'Skill ban nahi paya, dobara try karo.' });
-  await skills.updateOne(
-    { _id: sk.name },
-    {
-      $set: { ...sk, auto: false, disabled: false, source: desc },
-      $setOnInsert: { createdAt: new Date(), uses: 0, score: 0, version: 1 }
-    },
-    { upsert: true }
-  );
-  res.json({ name: sk.name, triggers: sk.triggers });
+  const r = await skillFromDescription(String(req.body.description || '').trim().slice(0, 600));
+  if (r.error) return res.status(r.code).json({ error: r.error });
+  res.json({ name: r.sk.name, triggers: r.sk.triggers });
 });
 
 app.post('/api/skills/improve', auth, needDb, rateLimit('improve', 6, 60000), async (req, res) => {
@@ -816,17 +1121,19 @@ app.delete('/api/skills/:name', auth, needDb, async (req, res) => {
   res.status(r.deletedCount ? 200 : 404).json({ ok: !!r.deletedCount });
 });
 
+app.post('/api/skills/from-chat', auth, needDb, rateLimit('teach', 6, 60000), async (req, res) => {
+  const r = await skillFromChat(req.body.messages);
+  if (r.error) return res.status(r.code).json({ error: r.error });
+  res.json({ name: r.sk.name, triggers: r.sk.triggers });
+});
+
+app.post('/api/evolve', auth, needDb, rateLimit('evolve', 3, 60000), async (req, res) => {
+  res.json(await evolveSkills(false));
+});
+
 app.get('/api/stats', auth, async (req, res) => {
   if (!dbReady()) return res.json({ facts: 0, lessons: 0, skills: 0, auto: 0, disabled: 0, chats: 0 });
-  const [facts, lessons, sk, auto, disabled, ch] = await Promise.all([
-    memories.countDocuments({ type: { $ne: 'lesson' } }),
-    memories.countDocuments({ type: 'lesson' }),
-    skills.countDocuments(),
-    skills.countDocuments({ auto: true }),
-    skills.countDocuments({ disabled: true }),
-    chats.countDocuments()
-  ]);
-  res.json({ facts, lessons, skills: sk, auto, disabled, chats: ch });
+  res.json(await statsObj());
 });
 
 // ================= SELF-IMPROVEMENT: FEEDBACK LOOP =================
@@ -847,18 +1154,9 @@ app.post('/api/feedback', auth, needDb, rateLimit('fb', 20, 60000), async (req, 
   // thumbs down
   let msg = '';
   if (used.length) {
-    await skills.updateMany({ _id: { $in: used } }, { $inc: { score: -1 } });
-    const list = await skills.find({ _id: { $in: used } }).toArray();
-    const improved = [], paused = [];
-    for (const sk of list.slice(0, 2)) {
-      if (await refineSkill(sk, prompt, reply, note)) improved.push(sk.name);
-      if ((sk.score || 0) <= -3 && (sk.uses || 0) >= 3) {
-        await skills.updateOne({ _id: sk._id }, { $set: { disabled: true } });
-        paused.push(sk.name);
-      }
-    }
+    const { improved, paused } = await applyNegative(used, prompt, reply, note);
     msg = improved.length ? '🧠 Skill improve kiya: ' + improved.join(', ') : '📝 Feedback note kar liya.';
-    if (paused.length) msg += ' ⛔ Band kiya (bahut 👎): ' + paused.join(', ') + ' (/enable se chalu karo)';
+    if (paused.length) msg += ' ⛔ Band kiya (bahut 👎): ' + paused.join(', ') + ' (bolo "' + paused[0] + ' skill chalu karo")';
     return res.json({ msg });
   }
 
@@ -912,6 +1210,19 @@ app.post('/api/generate', auth, rateLimit('gen', 25, 60000), async (req, res) =>
   if (isBad(own)) return res.status(403).json({ error: 'Blocked: Prompt injection detected!' });
   const convId = validId(req.body.convId) ? req.body.convId : crypto.randomUUID();
 
+  // ---- natural-language control of memory & skills (no slash commands needed) ----
+  const intentText = await handleIntent(own, clean, convId, !!clean[clean.length - 1].image)
+    .catch(e => { console.log('Intent error:', e.message); return null; });
+  if (intentText !== null) {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Skills-Used', '');
+    res.write(intentText);
+    res.end();
+    saveChat(convId, clean, mode, intentText);
+    return;
+  }
+
   // ---- system prompt = personality + memory + lessons + project + matching skills ----
   let sys = prompts[mode] + '\nToday is ' + new Date().toDateString() + '.';
   let hit = [];
@@ -932,7 +1243,7 @@ app.post('/api/generate', auth, rateLimit('gen', 25, 60000), async (req, res) =>
       }
       const lowered = own.toLowerCase();
       const all = await skills.find({ disabled: { $ne: true } }).toArray();
-      hit = all.filter(s => s.triggers.some(t => lowered.includes(t))).slice(0, 3);
+      hit = all.filter(s => s.triggers.some(t => matchesTrigger(lowered, t))).slice(0, 3);
       if (hit.length) {
         sys += '\n\nActive skills:\n' + hit.map(s => '[' + s.name + '] ' + s.instructions).join('\n');
         skills.updateMany({ _id: { $in: hit.map(s => s._id) } }, { $inc: { uses: 1 } }).catch(() => {});
@@ -1000,22 +1311,19 @@ app.post('/api/generate', auth, rateLimit('gen', 25, 60000), async (req, res) =>
 
   // ---- after reply: save chat + background self-learning ----
   if (full && dbReady()) {
-    const title = stripFile(clean[0].content).slice(0, 40) || 'Chat';
-    chats.updateOne(
-      { _id: convId },
-      {
-        $set: { messages: [...clean.map(m => ({ role: m.role, content: m.content })), { role: 'assistant', content: full }].slice(-100), mode, updatedAt: new Date() },
-        $setOnInsert: { title, createdAt: new Date() }
-      },
-      { upsert: true }
-    ).catch(err => console.log('DB Save Error:', err.message));
-
-    learnFromExchange(own).catch(() => {});
-    if (AUTO_SKILL && !hit.length && own.length >= 25 && (++reflectTick % REFLECT_EVERY === 0)) {
-      reflectForSkill(own).catch(e => console.log('Reflect error:', e.message));
-    }
+    saveChat(convId, clean, mode, full);
+    const prev = clean.length >= 2 && clean[clean.length - 2].role === 'assistant' ? clean[clean.length - 2].content : '';
+    const prevUser = clean.length >= 3 && clean[clean.length - 3].role === 'user' ? clean[clean.length - 3].content : '';
+    const prevSkills = (Array.isArray(req.body.prevSkills) ? req.body.prevSkills : [])
+      .map(x => String(x).toLowerCase()).filter(validId).slice(0, 5);
+    learnFromExchange(own, prev, prevSkills, prevUser).catch(e => console.log('Learn error:', e.message));
   }
 });
+
+// ================= DAILY SELF-TIDY =================
+setInterval(() => {
+  if (AUTO_SKILL && dbReady()) evolveSkills(true).catch(e => console.log('Evolve error:', e.message));
+}, 24 * 3600 * 1000);
 
 // ================= KEEP RENDER AWAKE =================
 setInterval(() => {
