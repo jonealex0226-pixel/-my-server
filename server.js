@@ -44,7 +44,7 @@ function promptGuard(req, res, next) {
   next();
 }
 
-// --- 3. FRONTEND UI (Boot + Markdown + History) ---
+// --- 3. FRONTEND UI ---
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
 <html>
@@ -55,11 +55,18 @@ app.get('/', (req, res) => {
     * { box-sizing: border-box; }
     body { background: #0f172a; color: #f8fafc; font-family: Arial; margin: 0; display: flex; height: 100vh; overflow: hidden; }
     
-    /* Boot Animation */
-    #boot-screen { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #0f172a; z-index: 9999; display: flex; flex-direction: column; justify-content: center; align-items: center; transition: opacity 0.5s ease; }
+    /* Boot Animation (Pure CSS fade-out so it NEVER gets stuck) */
+    #boot-screen { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #0f172a; z-index: 9999; display: flex; flex-direction: column; justify-content: center; align-items: center; animation: fadeOut 0.5s ease 1.5s forwards; }
     .boot-logo { font-size: 40px; font-weight: bold; color: #f59e0b; animation: pulse 1.5s infinite; text-shadow: 0 0 20px rgba(245, 158, 11, 0.5); }
     .boot-sub { color: #94a3b8; margin-top: 10px; font-size: 14px; letter-spacing: 2px; }
     @keyframes pulse { 0% { transform: scale(1); opacity: 0.7; } 50% { transform: scale(1.05); opacity: 1; } 100% { transform: scale(1); opacity: 0.7; } }
+    @keyframes fadeOut { to { opacity: 0; visibility: hidden; } }
+
+    /* Login Screen */
+    #login-screen { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #0f172a; z-index: 9000; display: none; flex-direction: column; justify-content: center; align-items: center; }
+    .login-box { background: #1e293b; padding: 30px; border-radius: 10px; text-align: center; border: 1px solid #334155; }
+    .login-box input { padding: 12px; border-radius: 5px; border: none; margin-bottom: 15px; width: 100%; font-size: 16px; }
+    .login-box button { padding: 12px; background: #f59e0b; color: #000; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; width: 100%; font-size: 16px; }
 
     /* Sidebar */
     #sidebar { width: 250px; background: #1e293b; position: fixed; height: 100%; left: -250px; transition: 0.3s; z-index: 100; padding: 20px; border-right: 1px solid #334155; display: flex; flex-direction: column; gap: 15px; }
@@ -110,12 +117,21 @@ app.get('/', (req, res) => {
     <div class="boot-sub">SYSTEM INITIALIZING...</div>
   </div>
 
+  <!-- Login Screen (Replaces the annoying popup) -->
+  <div id="login-screen">
+    <div class="login-box">
+      <h2 style="color: #f59e0b;">🔒 Access Required</h2>
+      <input type="password" id="loginPass" placeholder="Enter Password...">
+      <button onclick="checkLogin()">Unlock</button>
+      <p id="loginError" style="color: #ef4444; display: none; margin-top: 10px;">Wrong Password!</p>
+    </div>
+  </div>
+
   <!-- Sidebar -->
   <div id="sidebar">
     <h2 style="color: #f59e0b; margin-top: 0; text-align: center;">Nabla AI</h2>
     <button class="sidebar-btn" onclick="newChat()">➕ New Chat</button>
     <button class="sidebar-btn" onclick="alert('Projects coming soon!')">📁 Projects</button>
-    <button class="sidebar-btn" onclick="alert('Remote desktop requires a PC companion app.')">💻 Remote</button>
     
     <div class="mode-toggle">
       <button class="mode-btn active" id="btn-chat" onclick="setMode('chat')">Chat</button>
@@ -132,9 +148,7 @@ app.get('/', (req, res) => {
       <div class="header-title" id="header-title">⚡ Nabla AI (Hinglish)</div>
     </div>
 
-    <div id="chat-box">
-      <!-- Chat messages load here -->
-    </div>
+    <div id="chat-box"></div>
 
     <div class="input-area">
       <button class="icon-btn" onclick="document.getElementById('fileUpload').click()">+</button>
@@ -148,56 +162,65 @@ app.get('/', (req, res) => {
   </div>
   
   <script>
-    // --- BOOT ANIMATION LOGIC ---
-    window.addEventListener('load', () => {
+    // --- BOOT & LOGIN LOGIC ---
+    const SECURE_PASSWORD = "NablaAI@99";
+    let savedPass = null;
+
+    try { savedPass = localStorage.getItem('nabla_pass'); } catch(e) { console.log("LocalStorage blocked"); }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      // Check Auth
+      if (savedPass !== SECURE_PASSWORD) {
+        document.getElementById('login-screen').style.display = 'flex';
+      }
+      
+      // Force remove boot screen after 2 seconds (JS Fallback)
       setTimeout(() => {
         const boot = document.getElementById('boot-screen');
-        boot.style.opacity = '0';
-        setTimeout(() => boot.style.display = 'none', 500);
-      }, 1500); // 1.5 seconds boot time
+        if (boot) boot.remove();
+      }, 2000);
     });
 
-    // --- AUTHENTICATION ---
-    const SECURE_PASSWORD = "NablaAI@99";
-    if (localStorage.getItem('nabla_pass') !== SECURE_PASSWORD) {
-      let pass = prompt("🔒 Enter Password for Nabla AI:");
+    function checkLogin() {
+      const pass = document.getElementById('loginPass').value;
       if (pass === SECURE_PASSWORD) {
-        localStorage.setItem('nabla_pass', pass);
+        try { localStorage.setItem('nabla_pass', pass); } catch(e) {}
+        document.getElementById('login-screen').style.display = 'none';
+        document.getElementById('boot-screen').remove(); // Force hide boot screen
       } else {
-        alert("Galat password! Access Denied.");
-        document.body.innerHTML = "<h1 style='color:white; text-align:center; margin-top:50px;'>Access Denied</h1>";
+        document.getElementById('loginError').style.display = 'block';
       }
     }
 
     // --- UI & HISTORY LOGIC ---
     let currentMode = 'chat';
     let attachedFileText = "";
+    let chatHistory = [];
     
-    // Load history from local storage (persistent memory)
-    let chatHistory = JSON.parse(localStorage.getItem('nabla_history')) || [];
+    try {
+      chatHistory = JSON.parse(localStorage.getItem('nabla_history')) || [];
+    } catch(e) { chatHistory = []; }
+
     const chatBox = document.getElementById('chat-box');
 
-    // Markdown Parser (Converts **bold** to <b>bold</b> and \n to <br>)
     function formatText(text) {
       if (!text) return "";
-      return text
-        .replace(/\\*\\*(.*?)\\*\\*/g, '<b>$1</b>') // Bold
-        .replace(/\\*(.*?)\\*/g, '<i>$1</i>')     // Italic
-        .replace(/\\n/g, '<br>');                // Line breaks
+      try {
+        return String(text)
+          .replace(/\\*\\*(.*?)\\*\\*/g, '<b>$1</b>') 
+          .replace(/\\*(.*?)\\*/g, '<i>$1</i>')     
+          .replace(/\\n/g, '<br>');                
+      } catch(e) { return text; }
     }
 
-    // Render existing history on load
     function renderHistory() {
-      chatBox.innerHTML = ""; // Clear UI
+      chatBox.innerHTML = ""; 
       if (chatHistory.length === 0) {
         chatBox.innerHTML = '<div class="message ai">Namaste! Main Nabla AI hoon. Aaj main aapki kya madad kar sakta hoon?</div>';
       } else {
         chatHistory.forEach(msg => {
-          if (msg.role === 'user') {
-             chatBox.innerHTML += '<div class="message user">' + formatText(msg.content) + '</div>';
-          } else {
-             chatBox.innerHTML += '<div class="message ai">' + formatText(msg.content) + '</div>';
-          }
+          let className = msg.role === 'user' ? 'user' : 'ai';
+          chatBox.innerHTML += '<div class="message ' + className + '">' + formatText(msg.content) + '</div>';
         });
       }
       chatBox.scrollTop = chatBox.scrollHeight;
@@ -211,7 +234,7 @@ app.get('/', (req, res) => {
 
     function newChat() {
       chatHistory = [];
-      localStorage.removeItem('nabla_history'); // Clear saved memory
+      try { localStorage.removeItem('nabla_history'); } catch(e) {}
       renderHistory();
       toggleSidebar();
     }
@@ -238,7 +261,6 @@ app.get('/', (req, res) => {
       const reader = new FileReader();
       reader.onload = function(e) {
         attachedFileText = e.target.result;
-        // FIXED: Removed backticks here
         document.getElementById('promptInput').value += ' [Attached: ' + file.name + '] ';
       };
       reader.readAsText(file);
@@ -268,14 +290,11 @@ app.get('/', (req, res) => {
       if (!prompt && !attachedFileText) return;
       
       let finalPrompt = prompt;
-      // FIXED: Removed backticks here
       if (attachedFileText) {
         finalPrompt += '\n\n[FILE CONTENT START]\n' + attachedFileText + '\n[FILE CONTENT END]';
       }
 
-      // Add user msg to UI & History
-      const userHtml = '<div class="message user">' + formatText(prompt) + '</div>';
-      chatBox.innerHTML += userHtml;
+      chatBox.innerHTML += '<div class="message user">' + formatText(prompt) + '</div>';
       chatHistory.push({ role: "user", content: finalPrompt });
       
       input.value = "";
@@ -293,7 +312,7 @@ app.get('/', (req, res) => {
           method: 'POST',
           headers: { 
             'Content-Type': 'application/json',
-            'x-app-password': localStorage.getItem('nabla_pass')
+            'x-app-password': localStorage.getItem('nabla_pass') || SECURE_PASSWORD
           },
           body: JSON.stringify({ messages: chatHistory, mode: currentMode })
         });
@@ -309,14 +328,12 @@ app.get('/', (req, res) => {
           
           const chunk = decoder.decode(value);
           fullReply += chunk;
-          // Format live while streaming
           aiMsgDiv.innerHTML = formatText(fullReply); 
           chatBox.scrollTop = chatBox.scrollHeight;
         }
         
         chatHistory.push({ role: "assistant", content: fullReply });
-        // Save History to LocalStorage permanently!
-        localStorage.setItem('nabla_history', JSON.stringify(chatHistory));
+        try { localStorage.setItem('nabla_history', JSON.stringify(chatHistory)); } catch(e) {}
 
       } catch (err) {
         aiMsgDiv.innerText = "❌ Error connecting to AI.";
