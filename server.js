@@ -17,7 +17,7 @@ if (uri) {
   const client = new MongoClient(uri);
   client.connect()
     .then(() => {
-      db = client.db('hermes_ai'); // You can change this to 'nabla_ai' later
+      db = client.db('hermes_ai'); 
       chatsCollection = db.collection('chats');
       console.log('✅ Connected to MongoDB');
     })
@@ -238,7 +238,8 @@ app.get('/', (req, res) => {
       const reader = new FileReader();
       reader.onload = function(e) {
         attachedFileText = e.target.result;
-        document.getElementById('promptInput').value += ` [Attached: ${file.name}] `;
+        // FIXED: Removed backticks here
+        document.getElementById('promptInput').value += ' [Attached: ' + file.name + '] ';
       };
       reader.readAsText(file);
     }
@@ -267,7 +268,10 @@ app.get('/', (req, res) => {
       if (!prompt && !attachedFileText) return;
       
       let finalPrompt = prompt;
-      if (attachedFileText) finalPrompt += `\n\n[FILE CONTENT START]\n${attachedFileText}\n[FILE CONTENT END]`;
+      // FIXED: Removed backticks here
+      if (attachedFileText) {
+        finalPrompt += '\n\n[FILE CONTENT START]\n' + attachedFileText + '\n[FILE CONTENT END]';
+      }
 
       // Add user msg to UI & History
       const userHtml = '<div class="message user">' + formatText(prompt) + '</div>';
